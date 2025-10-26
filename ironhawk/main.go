@@ -221,6 +221,20 @@ func Run(host string, port int, cfg Config) {
 					maybeAckOnReceive(mgr, client, sub, resp)
 				}
 			}
+
+			// Stop any batching ticker and flush pending highest index on exit
+			sub.mu.Lock()
+			if sub.flushTicker != nil {
+				sub.flushTicker.Stop()
+			}
+			hi := sub.highestIndex
+			pc := sub.pendingCount
+			sub.highestIndex = 0
+			sub.pendingCount = 0
+			sub.mu.Unlock()
+			if pc > 0 {
+				_ = sendEmitAck(client, sub.Key, sub.SubID, hi)
+			}
 		} else {
 			// If the command is not a watch command, render the response
 			// and continue to the next command in REPL

@@ -222,7 +222,9 @@ func maybeAckOnReceive(mgr *Manager, client fireClient, sub *Subscription, resp 
     if mgr == nil || sub == nil || resp == nil {
         return
     }
-    if sub.AckPolicy != AutoAckOnReceive {
+    // We call this after rendering (apply), so both AutoAckOnReceive and
+    // AutoAckAfterApply are eligible here. ManualAck is skipped.
+    if sub.AckPolicy == ManualAck {
         return
     }
     // Extract commit index
