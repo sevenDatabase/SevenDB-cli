@@ -6,8 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
-    "strconv"
 
 	"github.com/chzyer/readline"
 	"github.com/dicedb/dicedb-go"
@@ -30,7 +30,7 @@ func Run(host string, port int, cfg Config) {
 	}
 	defer client.Close()
 
-    mgr := NewManager(cfg)
+	mgr := NewManager(cfg)
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:      fmt.Sprintf("%s:%s> ", boldBlue(host), boldBlue(port)),

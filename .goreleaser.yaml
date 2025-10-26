@@ -1,6 +1,6 @@
 version: 2
 
-project_name: dicedb-cli
+project_name: sevendb-cli
 before:
   hooks:
     - go mod tidy
@@ -17,7 +17,7 @@ builds:
       - amd64
       - arm
       - arm64
-    binary: dicedb-cli
+    binary: sevendb-cli
 
 archives:
   - format: tar.gz

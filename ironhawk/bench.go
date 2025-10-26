@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dicedb/dicedb-cli/bench"
 	"github.com/dicedb/dicedb-go"
 	"github.com/dicedb/dicedb-go/wire"
+	"github.com/sevendatabase/sevendb-cli/bench"
 )
 
 func benchmarkCommand(b *testing.B) {

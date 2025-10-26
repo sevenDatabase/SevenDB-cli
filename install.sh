@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-REPO="dicedb/dicedb-cli"
+REPO="sevendatabase/sevendb-cli"
 LATEST_RELEASE=$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
 VERSION=$(echo $LATEST_RELEASE | sed 's/^v//')
 
@@ -23,7 +23,7 @@ case $ARCH in
   *) echo "Architecture not supported"; exit 1 ;;
 esac
 
-BINARY="dicedb-cli_${VERSION}_${OS}_${ARCH}.tar.gz"
+BINARY="sevendb-cli_${VERSION}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$LATEST_RELEASE/$BINARY"
 
 echo "Downloading $BINARY..."
@@ -31,7 +31,7 @@ curl -L $URL -o /tmp/$BINARY
 
 # Extract and move to /usr/local/bin
 tar -xzf /tmp/$BINARY -C /tmp
-chmod 777 /tmp/dicedb-cli
+chmod 777 /tmp/sevendb-cli
 
 DICEDB_DIR=/usr/local/dicedb
 DICEDB_BIN_DIR=$DICEDB_DIR/bin
@@ -45,8 +45,8 @@ if [ ! -d "$DICEDB_BIN_DIR" ]; then
   sudo chmod 777 $DICEDB_BIN_DIR
 fi
 
-mv /tmp/dicedb-cli $DICEDB_BIN_DIR
-sudo ln -sf $DICEDB_BIN_DIR/dicedb-cli /usr/local/bin/dicedb-cli
+mv /tmp/sevendb-cli $DICEDB_BIN_DIR
+sudo ln -sf $DICEDB_BIN_DIR/sevendb-cli /usr/local/bin/dicedb-cli
 
 echo "\n
 ██████╗ ██╗ ██████╗███████╗██████╗ ██████╗ 
