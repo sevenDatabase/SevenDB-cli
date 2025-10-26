@@ -47,6 +47,25 @@ You can also get all available parameters by firing
 $ sevendb-cli --help
 ```
 
+### Emission resume and acknowledgements (opt-in)
+
+This CLI supports acknowledging emissions and resuming after reconnect. It is opt-in and won’t change behavior unless you enable it.
+
+- Flags:
+	- `--emit-ack-policy` one of `auto-on-receive` (default), `auto-after-apply`, `manual`
+	- `--emitreconnect-on-reconnect` best-effort automatic EMITRECONNECT on reconnect (default: true)
+	- `--emit-ack-batch-size` coalesce ACKs (0 disables)
+	- `--emit-ack-flush-interval` periodic flush for ACK batching (e.g., `200ms`)
+	- `--verbose` logs extra details about emit sequences, acks, and reconnect decisions
+
+- Local REPL helpers (prefixed with `:`):
+	- `:emitreconnect` — calls `EMITRECONNECT <key> <sub_id> <last_index>` for the current watch subscription
+	- `:emitack [commitIndex]` — sends `EMITACK` for the given or last processed commit index
+
+Notes:
+- Subscriptions are identified using the watch response fingerprint as `sub_id`.
+- When enabled, the CLI will attempt to auto-ACK emissions on receive and resume from the next index after reconnect if the server returns `OK <nextIndex>`. If the server replies `STALE_SEQUENCE`, `INVALID_SEQUENCE` or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command.
+
 ## Firing commands
 
 You can execute any DiceDB command directly:
