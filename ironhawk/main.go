@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+    "strconv"
 
 	"github.com/chzyer/readline"
 	"github.com/dicedb/dicedb-go"
@@ -22,12 +23,14 @@ var (
 	boldGreen = color.New(color.FgGreen, color.Bold).SprintFunc()
 )
 
-func Run(host string, port int) {
+func Run(host string, port int, cfg Config) {
 	client, err := dicedb.NewClient(host, port)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
+
+    mgr := NewManager(cfg)
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:      fmt.Sprintf("%s:%s> ", boldBlue(host), boldBlue(port)),
@@ -79,6 +82,81 @@ func Run(host string, port int) {
 			continue
 		}
 
+		// Local helper commands (prefixed with ":")
+		// :emitreconnect -> uses current subscription and last processed index
+		if strings.HasPrefix(input, ":") {
+			fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(input, ":")))
+			if len(fields) == 0 {
+				continue
+			}
+			switch strings.ToLower(fields[0]) {
+			case "emitreconnect":
+				sub := mgr.Current()
+				if sub == nil {
+					fmt.Println(boldRed("ERR"), "no active subscription for reconnect")
+					continue
+				}
+				status, nextIdx, err := emitReconnect(client, sub.Key, sub.SubID, sub.LastProcessedCommitIndex)
+				if err != nil {
+					fmt.Println(boldRed("ERR"), err)
+					continue
+				}
+				switch status {
+				case "OK":
+					if cfg.Verbose {
+						fmt.Printf("resume allowed: nextIndex=%d\n", nextIdx)
+					}
+					sub.mu.Lock()
+					sub.ResumeNextIndex = nextIdx
+					sub.State = StateResuming
+					// Defensive: align watermark
+					if nextIdx > 0 && nextIdx > sub.LastProcessedCommitIndex+1 {
+						sub.LastProcessedCommitIndex = nextIdx - 1
+					}
+					sub.mu.Unlock()
+					fmt.Println(boldGreen("OK"), nextIdx)
+				case "STALE_SEQUENCE", "INVALID_SEQUENCE", "SUBSCRIPTION_NOT_FOUND":
+					sub.mu.Lock()
+					sub.State = StatePaused
+					sub.mu.Unlock()
+					fmt.Println(boldRed("WARN"), status, "-> please re-subscribe (issue the WATCH command again)")
+				default:
+					fmt.Println(status)
+				}
+				continue
+			case "emitack":
+				// :emitack [commitIndex]
+				sub := mgr.Current()
+				if sub == nil {
+					fmt.Println(boldRed("ERR"), "no active subscription for ack")
+					continue
+				}
+				var idx uint64
+				if len(fields) >= 2 {
+					if u, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+						idx = u
+					}
+				}
+				if idx == 0 {
+					sub.mu.Lock()
+					idx = sub.LastProcessedCommitIndex
+					sub.mu.Unlock()
+				}
+				if idx == 0 {
+					fmt.Println(boldRed("ERR"), "no commit index available to ack")
+					continue
+				}
+				if err := sendEmitAck(client, sub.Key, sub.SubID, idx); err != nil {
+					fmt.Println(boldRed("ERR"), err)
+				} else {
+					if cfg.Verbose {
+						fmt.Println("ACK sent for index", idx)
+					}
+				}
+				continue
+			}
+		}
+
 		args := parseArgs(input)
 		if len(args) == 0 {
 			continue
@@ -101,6 +179,20 @@ func Run(host string, port int) {
 			// Send a signal to the primary Signal handler goroutine
 			// that the watch mode has been entered
 			watchModeSignal <- true
+
+			// Use fingerprint as best-effort SubID if server doesn't provide a distinct ID
+			subID := fmt.Sprintf("%d", resp.Fingerprint64)
+			key := ""
+			if len(c.Args) > 0 {
+				key = c.Args[0]
+			}
+			sub := &Subscription{
+				SubID:     subID,
+				Key:       key,
+				AckPolicy: mgr.cfg.AckPolicy,
+				State:     StateActive,
+			}
+			mgr.SetCurrent(sub)
 
 			// Get the watch channel and start watching for changes
 			ch, err := client.WatchCh()
@@ -125,6 +217,8 @@ func Run(host string, port int) {
 					// If we get any response over the watch channel,
 					// render the response
 					renderResponse(resp)
+					// Apply ack policy if enabled
+					maybeAckOnReceive(mgr, client, sub, resp)
 				}
 			}
 		} else {
