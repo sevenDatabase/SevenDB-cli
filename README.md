@@ -47,6 +47,23 @@ You can also get all available parameters by firing
 $ sevendb-cli --help
 ```
 
+## Firing commands
+
+You can execute any DiceDB or SevenDB command directly:
+
+```bash
+localhost:7379> SET k1 v1
+OK OK
+localhost:7379> GET k1
+OK "v1"
+localhost:7379> DEL k1
+OK 1
+```
+
+You can find all available commands at [dicedb.io/docs](https://dicedb.io/docs).
+
+
+
 ### Emission resume and acknowledgements (opt-in)
 
 This CLI supports acknowledging emissions and resuming after reconnect. It is opt-in and won’t change behavior unless you enable it.
@@ -65,21 +82,6 @@ This CLI supports acknowledging emissions and resuming after reconnect. It is op
 Notes:
 - Subscriptions are identified using the watch response fingerprint as `sub_id`.
 - When enabled, the CLI will attempt to auto-ACK emissions on receive and resume from the next index after reconnect if the server returns `OK <nextIndex>`. If the server replies `STALE_SEQUENCE`, `INVALID_SEQUENCE` or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command.
-
-## Firing commands
-
-You can execute any DiceDB command directly:
-
-```bash
-localhost:7379> SET k1 v1
-OK OK
-localhost:7379> GET k1
-OK "v1"
-localhost:7379> DEL k1
-OK 1
-```
-
-You can find all available commands at [dicedb.io/docs](https://dicedb.io/docs).
 
 ## License
 
