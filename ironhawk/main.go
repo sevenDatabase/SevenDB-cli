@@ -42,6 +42,25 @@ func Run(host string, port int, cfg Config) {
 	}
 	defer rl.Close()
 
+	// Probe server for a session-scoped clientID via HELLO (if supported)
+	// This helps construct SubID as clientID:fingerprint64 expected by server.
+	if cfg.Verbose {
+		fmt.Println("probing server for clientID via HELLO…")
+	}
+	helloRes := client.Fire(&wire.Command{Cmd: "HELLO"})
+	if helloRes != nil && helloRes.Status != wire.Status_ERR {
+		if id, ok := extractClientID(helloRes); ok {
+			mgr.SetClientID(id)
+			if cfg.Verbose {
+				fmt.Println("clientID:", id)
+			}
+		} else if cfg.Verbose {
+			fmt.Println("HELLO responded but clientID not found in payload")
+		}
+	} else if cfg.Verbose {
+		fmt.Println("HELLO not supported or failed; falling back to fingerprint-only SubID")
+	}
+
 	// Signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt)
@@ -113,6 +132,9 @@ func Run(host string, port int, cfg Config) {
 					if nextIdx > 0 && nextIdx > sub.LastProcessedCommitIndex+1 {
 						sub.LastProcessedCommitIndex = nextIdx - 1
 					}
+					// Reset any pending batch state to keep ACKs monotonic after resume
+					sub.highestIndex = 0
+					sub.pendingCount = 0
 					sub.mu.Unlock()
 					fmt.Println(boldGreen("OK"), nextIdx)
 				case "STALE_SEQUENCE", "INVALID_SEQUENCE", "SUBSCRIPTION_NOT_FOUND":
@@ -181,7 +203,13 @@ func Run(host string, port int, cfg Config) {
 			watchModeSignal <- true
 
 			// Use fingerprint as best-effort SubID if server doesn't provide a distinct ID
+			// Build SubID as clientID:fingerprint64 when clientID is available
 			subID := fmt.Sprintf("%d", resp.Fingerprint64)
+			if cid := mgr.ClientID(); cid != "" {
+				subID = fmt.Sprintf("%s:%s", cid, subID)
+			} else if cfg.Verbose {
+				fmt.Println("warning: clientID unknown; SubID will be fingerprint-only—server may not accept ACK/RECONNECT")
+			}
 			key := ""
 			if len(c.Args) > 0 {
 				key = c.Args[0]
