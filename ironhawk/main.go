@@ -539,9 +539,55 @@ func renderResponse(resp *wire.Result) {
 
 func parseArgs(input string) []string {
 	args, err := shlex.Split(input)
-	if err != nil {
-		fmt.Printf("%s failed to parse command: %v\n", boldRed("ERR"), err)
-		return []string{}
+	if err == nil {
+		return args
 	}
-	return args
+	// Fallback: tolerant splitter that handles basic quoting and
+	// recovers from unterminated quotes by taking the rest of line.
+	// This is intentionally simple to cover REPL convenience cases only.
+	var out []string
+	var cur []rune
+	inQuote := false
+	var q rune
+	rs := []rune(input)
+	for i := 0; i < len(rs); i++ {
+		ch := rs[i]
+		if inQuote {
+			if ch == '\\' { // escape next char inside quotes
+				if i+1 < len(rs) {
+					cur = append(cur, rs[i+1])
+					i++
+				} else {
+					// trailing backslash, keep it
+					cur = append(cur, ch)
+				}
+				continue
+			}
+			if ch == q { // closing quote
+				inQuote = false
+				continue
+			}
+			cur = append(cur, ch)
+			continue
+		}
+		// outside quotes
+		switch ch {
+		case '\'', '"':
+			inQuote = true
+			q = ch
+		case ' ', '\t', '\n', '\r':
+			if len(cur) > 0 {
+				out = append(out, string(cur))
+				cur = cur[:0]
+			}
+		default:
+			cur = append(cur, ch)
+		}
+	}
+	if len(cur) > 0 {
+		out = append(out, string(cur))
+	}
+	// If we ended still in quotes, we accept the collected token as-is
+	// so unterminated quotes are tolerated.
+	return out
 }
