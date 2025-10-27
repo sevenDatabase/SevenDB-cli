@@ -70,10 +70,15 @@ type Config struct {
 type Subscription struct {
 	SubID                    string
 	Key                      string
+	Fingerprint               uint64
 	LastProcessedCommitIndex uint64
 	ResumeNextIndex          uint64
 	AckPolicy                AckPolicy
 	State                    SubState
+
+	// Original watch command to re-subscribe on reconnect
+	WatchCmd  string
+	WatchArgs []string
 
 	// batching state
 	mu           sync.Mutex

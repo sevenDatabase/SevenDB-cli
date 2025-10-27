@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 	"strconv"
 	"strings"
 
@@ -204,7 +205,8 @@ func Run(host string, port int, cfg Config) {
 
 			// Use fingerprint as best-effort SubID if server doesn't provide a distinct ID
 			// Build SubID as clientID:fingerprint64 when clientID is available
-			subID := fmt.Sprintf("%d", resp.Fingerprint64)
+			fingerprint := resp.Fingerprint64
+			subID := fmt.Sprintf("%d", fingerprint)
 			if cid := mgr.ClientID(); cid != "" {
 				subID = fmt.Sprintf("%s:%s", cid, subID)
 			} else if cfg.Verbose {
@@ -215,10 +217,13 @@ func Run(host string, port int, cfg Config) {
 				key = c.Args[0]
 			}
 			sub := &Subscription{
-				SubID:     subID,
-				Key:       key,
-				AckPolicy: mgr.cfg.AckPolicy,
-				State:     StateActive,
+				SubID:      subID,
+				Key:        key,
+				Fingerprint: fingerprint,
+				AckPolicy:  mgr.cfg.AckPolicy,
+				State:      StateActive,
+				WatchCmd:   c.Cmd,
+				WatchArgs:  append([]string(nil), c.Args...),
 			}
 			mgr.SetCurrent(sub)
 
@@ -241,10 +246,111 @@ func Run(host string, port int, cfg Config) {
 				case <-sigChanWatchMode:
 					fmt.Println("exiting the watch mode. back to command mode")
 					shouldExitWatchMode = true
-				case resp := <-ch:
+				case resp, ok := <-ch:
+					if !ok || resp == nil {
+						// Disconnected: attempt to reconnect if enabled
+						if !cfg.AutoReconnect {
+							fmt.Println(boldRed("ERR"), "connection lost; auto reconnect disabled. Exiting watch mode.")
+							shouldExitWatchMode = true
+							break
+						}
+						if cfg.Verbose {
+							fmt.Println("connection lost; attempting to reconnect…")
+						}
+						// retry loop with simple backoff
+						backoff := time.Second
+						var newClient *dicedb.Client
+						for {
+							cl, err := dicedb.NewClient(host, port)
+							if err == nil {
+								newClient = cl
+								break
+							}
+							if cfg.Verbose {
+								fmt.Println("reconnect failed:", err, "; retrying in", backoff)
+							}
+							time.Sleep(backoff)
+							if backoff < 10*time.Second {
+								backoff *= 2
+							}
+						}
+
+						// swap client and re-probe HELLO for new clientID
+						client = newClient
+						helloRes := client.Fire(&wire.Command{Cmd: "HELLO"})
+						if helloRes != nil && helloRes.Status != wire.Status_ERR {
+							if id, ok := extractClientID(helloRes); ok {
+								mgr.SetClientID(id)
+								if cfg.Verbose {
+									fmt.Println("clientID:", id)
+								}
+							}
+						}
+
+						// rebuild SubID using new clientID and existing fingerprint
+						cid := mgr.ClientID()
+						if cid != "" {
+							sub.mu.Lock()
+							sub.SubID = fmt.Sprintf("%s:%d", cid, sub.Fingerprint)
+							sub.mu.Unlock()
+						}
+
+						// Try EMITRECONNECT first
+						if cfg.Verbose {
+							fmt.Println("calling EMITRECONNECT with last index", sub.LastProcessedCommitIndex)
+						}
+						status, nextIdx, err := emitReconnect(client, sub.Key, sub.SubID, sub.LastProcessedCommitIndex)
+						if err == nil && strings.ToUpper(status) == "OK" {
+							if cfg.Verbose {
+								fmt.Printf("resume allowed: nextIndex=%d\n", nextIdx)
+							}
+							sub.mu.Lock()
+							sub.ResumeNextIndex = nextIdx
+							sub.State = StateResuming
+							if nextIdx > 0 && nextIdx > sub.LastProcessedCommitIndex+1 {
+								sub.LastProcessedCommitIndex = nextIdx - 1
+							}
+							// reset batch
+							sub.highestIndex = 0
+							sub.pendingCount = 0
+							sub.mu.Unlock()
+							// re-open watch channel
+							ch, _ = client.WatchCh()
+							continue
+						}
+
+						// If reconnect isn’t valid, re-subscribe using the original WATCH command
+						if cfg.Verbose {
+							fmt.Println("EMITRECONNECT not accepted (", status, ") — re-subscribing…")
+						}
+						watchCmd := &wire.Command{Cmd: sub.WatchCmd, Args: append([]string(nil), sub.WatchArgs...)}
+						wresp := client.Fire(watchCmd)
+						if wresp == nil || wresp.Status == wire.Status_ERR {
+							if cfg.Verbose {
+								fmt.Println("re-subscribe failed; will keep retrying via channel close path…")
+							}
+							// sleep a moment and loop back to try again
+							time.Sleep(time.Second)
+							continue
+						}
+						// update fingerprint and SubID
+						sub.mu.Lock()
+						sub.Fingerprint = wresp.Fingerprint64
+						if cid != "" {
+							sub.SubID = fmt.Sprintf("%s:%d", cid, sub.Fingerprint)
+						} else {
+							sub.SubID = fmt.Sprintf("%d", sub.Fingerprint)
+						}
+						sub.State = StateActive
+						sub.mu.Unlock()
+						ch, _ = client.WatchCh()
+						continue
+					}
 					// If we get any response over the watch channel,
 					// render the response
-					renderResponse(resp)
+					if resp != nil {
+						renderResponse(resp)
+					}
 					// Apply ack policy if enabled
 					maybeAckOnReceive(mgr, client, sub, resp)
 				}
@@ -280,6 +386,10 @@ func printGEOElement(index int, e *wire.GEOElement) {
 }
 
 func renderResponse(resp *wire.Result) {
+	if resp == nil {
+		// Defensive guard: nothing to render (likely watch channel closed)
+		return
+	}
 	if resp.Status == wire.Status_ERR {
 		fmt.Printf("%s %s\n", boldRed("ERR"), resp.Message)
 		return
