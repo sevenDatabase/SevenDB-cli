@@ -37,7 +37,7 @@ func init() {
 	rootCmd.PersistentFlags().String("host", "localhost", "hostname or ip address of the DiceDB server")
 	rootCmd.PersistentFlags().Int("port", 7379, "port number of the DiceDB server")
 	// Emission/ACK related flags (opt-in, non-breaking defaults)
-	rootCmd.PersistentFlags().String("emit-ack-policy", "auto-on-receive", "emission ack policy: auto-on-receive | auto-after-apply | manual")
+	rootCmd.PersistentFlags().String("emit-ack-policy", "manual", "emission ack policy: auto-on-receive | auto-after-apply | manual")
 	rootCmd.PersistentFlags().Bool("emitreconnect-on-reconnect", true, "automatically call EMITRECONNECT for active subscriptions on reconnect (best-effort)")
 	rootCmd.PersistentFlags().Int("emit-ack-batch-size", 0, "batch up to N acks before sending (0=disable)")
 	rootCmd.PersistentFlags().Duration("emit-ack-flush-interval", 0, "periodic flush interval for ack batching (0=disable)")
