@@ -84,6 +84,15 @@ Notes:
 - Until the server includes a commit index in emissions, auto-ack won’t fire (no index to ACK). Manual `:emitack <index>` is the safe default.
 - When EMITRECONNECT returns `OK <nextIndex>`, the CLI records that resume point; if it returns `STALE_SEQUENCE`, `INVALID_SEQUENCE`, or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command to recover.
 
+#### Server contract for HELLO (HELLORes)
+
+To enable stable SubID construction, the server should implement a typed response for `HELLO` with a payload named `HELLORes` that includes a `clientId` string field, for example:
+
+- Command: `HELLO`
+- Response: `OK` with typed payload `HELLORes { clientId: "..." }`
+
+This CLI prefers the typed `HELLORes.clientId`. For backwards compatibility, if a typed payload is not present, the CLI will attempt to parse `client_id`/`clientId` from the textual `Result.Message` (JSON or simple key/value forms).
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

@@ -176,7 +176,11 @@ func extractCommitIndex(resp *wire.Result) (uint64, bool) {
 	return search(m)
 }
 
-// extractClientID attempts to find a clientId field from a handshake/hello response
+// extractClientID attempts to find a clientId from a HELLO response.
+// Preferred contract: server returns a typed HELLORes payload with a field named
+// `clientId` (or `client_id`). We first look for a typed field via JSON tree scan,
+// which works for typed oneof payloads too, then fall back to parsing Result.Message
+// for JSON or simple key-value forms to maintain compatibility with older servers.
 func extractClientID(resp *wire.Result) (string, bool) {
 	if resp == nil {
 		return "", false
