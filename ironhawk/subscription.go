@@ -216,7 +216,43 @@ func extractClientID(resp *wire.Result) (string, bool) {
 		}
 		return "", false
 	}
-	return search(m)
+	if s, ok := search(m); ok {
+		return s, true
+	}
+	// Fallback: try to parse client id from Result.Message if it contains JSON
+	if msg := strings.TrimSpace(resp.Message); msg != "" {
+		var mm any
+		if json.Unmarshal([]byte(msg), &mm) == nil {
+			if s, ok := search(mm); ok {
+				return s, true
+			}
+		}
+		// Also allow simple forms like: client_id=<value> or clientId=<value>
+		// e.g., "client_id: abc123" or "clientId=abc123"
+		lower := strings.ToLower(msg)
+		for _, key := range []string{"client_id", "clientid", "client"} {
+			if i := strings.Index(lower, key); i >= 0 {
+				// find separator after key
+				rest := strings.TrimSpace(msg[i+len(key):])
+				if len(rest) > 0 && (rest[0] == ':' || rest[0] == '=') {
+					rest = strings.TrimSpace(rest[1:])
+				}
+				// take first token (up to whitespace or JSON punctuation)
+				end := len(rest)
+				for j, ch := range rest {
+					if ch == ' ' || ch == ',' || ch == '}' || ch == ']' || ch == '\n' || ch == '\t' {
+						end = j
+						break
+					}
+				}
+				cand := strings.Trim(rest[:end], `"'`)
+				if cand != "" {
+					return cand, true
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 // sendEmitAck sends EMITACK <key> <sub_id> <commit_index>
