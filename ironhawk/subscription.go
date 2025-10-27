@@ -87,6 +87,8 @@ type Manager struct {
 	cfg Config
 	sub *Subscription // current single watch in this CLI
 	mu  sync.RWMutex
+	// session-scoped server-side client identifier, used to build SubID
+	clientID string
 }
 
 func NewManager(cfg Config) *Manager {
@@ -103,6 +105,18 @@ func (m *Manager) Current() *Subscription {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sub
+}
+
+func (m *Manager) SetClientID(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clientID = id
+}
+
+func (m *Manager) ClientID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.clientID
 }
 
 // extractCommitIndex attempts to find EmitSeq.CommitIndex in a watch Result using JSON as a generic path.
@@ -153,6 +167,49 @@ func extractCommitIndex(resp *wire.Result) (uint64, bool) {
 			}
 		}
 		return 0, false
+	}
+	return search(m)
+}
+
+// extractClientID attempts to find a clientId field from a handshake/hello response
+func extractClientID(resp *wire.Result) (string, bool) {
+	if resp == nil {
+		return "", false
+	}
+	b, err := protojson.Marshal(resp)
+	if err != nil {
+		return "", false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return "", false
+	}
+	// recursive search for keys named clientId | clientID | client_id
+	var search func(any) (string, bool)
+	search = func(v any) (string, bool) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			for k, vv := range t {
+				lk := strings.ToLower(k)
+				if lk == "clientid" || lk == "client_id" || lk == "client" { // be generous
+					if s, ok := vv.(string); ok && s != "" {
+						return s, true
+					}
+				}
+			}
+			for _, vv := range t {
+				if s, ok := search(vv); ok {
+					return s, true
+				}
+			}
+		case []interface{}:
+			for _, it := range t {
+				if s, ok := search(it); ok {
+					return s, true
+				}
+			}
+		}
+		return "", false
 	}
 	return search(m)
 }

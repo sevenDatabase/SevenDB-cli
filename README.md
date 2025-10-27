@@ -69,7 +69,7 @@ You can find all available commands at [dicedb.io/docs](https://dicedb.io/docs).
 This CLI supports acknowledging emissions and resuming after reconnect. It is opt-in and won’t change behavior unless you enable it.
 
 - Flags:
-	- `--emit-ack-policy` one of `auto-on-receive` (default), `auto-after-apply`, `manual`
+	- `--emit-ack-policy` one of `manual` (default), `auto-on-receive`, `auto-after-apply`
 	- `--emitreconnect-on-reconnect` best-effort automatic EMITRECONNECT on reconnect (default: true)
 	- `--emit-ack-batch-size` coalesce ACKs (0 disables)
 	- `--emit-ack-flush-interval` periodic flush for ACK batching (e.g., `200ms`)
@@ -80,8 +80,9 @@ This CLI supports acknowledging emissions and resuming after reconnect. It is op
 	- `:emitack [commitIndex]` — sends `EMITACK` for the given or last processed commit index
 
 Notes:
-- Subscriptions are identified using the watch response fingerprint as `sub_id`.
-- When enabled, the CLI will attempt to auto-ACK emissions on receive and resume from the next index after reconnect if the server returns `OK <nextIndex>`. If the server replies `STALE_SEQUENCE`, `INVALID_SEQUENCE` or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command.
+- SubIDs are constructed as `clientID:fingerprint64` when the server exposes a clientID via `HELLO`; otherwise the CLI falls back to fingerprint-only and warns in verbose mode.
+- Until the server includes a commit index in emissions, auto-ack won’t fire (no index to ACK). Manual `:emitack <index>` is the safe default.
+- When EMITRECONNECT returns `OK <nextIndex>`, the CLI records that resume point; if it returns `STALE_SEQUENCE`, `INVALID_SEQUENCE`, or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command to recover.
 
 ## License
 
