@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/dicedb/dicedb-cli/cmd"
+	"github.com/sevendatabase/sevendb-cli/cmd"
 )
 
 func main() {

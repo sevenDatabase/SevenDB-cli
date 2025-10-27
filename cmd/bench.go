@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"github.com/dicedb/dicedb-cli/ironhawk"
+	"github.com/sevendatabase/sevendb-cli/ironhawk"
 	"github.com/spf13/cobra"
 )
 
