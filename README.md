@@ -1,4 +1,4 @@
-# DiceDB CLI
+# SevenDB CLI
 
 This is a command line interface for [SevenDB](https://sevendb.com).
 
