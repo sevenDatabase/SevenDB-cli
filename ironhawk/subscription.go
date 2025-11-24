@@ -64,6 +64,12 @@ type Config struct {
 	AckBatchSize     int
 	AckFlushInterval time.Duration
 	Verbose          bool
+	NoAck            bool
+	DedupeStateFile  string
+	ReconnectRetries int
+	ReconnectBackoffMax time.Duration
+	WatchDumpRaw     bool
+	AckSeparateConn  bool
 }
 
 // Subscription stores per-subscription state
@@ -75,6 +81,10 @@ type Subscription struct {
 	ResumeNextIndex          uint64
 	AckPolicy                AckPolicy
 	State                    SubState
+
+	// Last observed emission epoch identifiers (for resume and logging)
+	EpochUUID   string
+	EpochCounter uint64
 
 	// Original watch command to re-subscribe on reconnect
 	WatchCmd  string

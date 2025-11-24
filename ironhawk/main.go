@@ -32,6 +32,18 @@ func Run(host string, port int, cfg Config) {
 	defer client.Close()
 
 	mgr := NewManager(cfg)
+	// Set up dedupe store
+	var ds DedupeStore
+	if cfg.DedupeStateFile != "" {
+		if fds, err := NewFileDedupe(cfg.DedupeStateFile); err == nil {
+			ds = fds
+		} else {
+			fmt.Printf("%s failed to open dedupe state file (%v); using in-memory dedupe only\n", boldRed("WARN"), err)
+			ds = NewInMemoryDedupe()
+		}
+	} else {
+		ds = NewInMemoryDedupe()
+	}
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:      fmt.Sprintf("%s:%s> ", boldBlue(host), boldBlue(port)),
@@ -203,15 +215,45 @@ func Run(host string, port int, cfg Config) {
 			// that the watch mode has been entered
 			watchModeSignal <- true
 
+			// Refresh ClientID right before WATCH to ensure we have the correct ID for this connection
+			// This helps if the connection was reset or if we are in a pool (though CLI usually uses one)
+			helloRes := client.Fire(&wire.Command{Cmd: "HELLO"})
+			if helloRes != nil && helloRes.Status != wire.Status_ERR {
+				if id, ok := extractClientID(helloRes); ok {
+					mgr.SetClientID(id)
+					if cfg.Verbose {
+						fmt.Println("refreshed clientID:", id)
+					}
+				}
+			}
+
+			resp := client.Fire(c)
+			if resp.Status == wire.Status_ERR {
+				renderResponse(resp)
+				continue
+			}
+
 			// Use fingerprint as best-effort SubID if server doesn't provide a distinct ID
 			// Build SubID as clientID:fingerprint64 when clientID is available
 			fingerprint := resp.Fingerprint64
+			// Fallback: try to parse fingerprint from message if not in typed field
+			if fingerprint == 0 && resp.Message != "" {
+				if fp, ok := parseFingerprintFromMsg(resp.Message); ok {
+					fingerprint = fp
+					if cfg.Verbose {
+						fmt.Println("parsed fingerprint from message:", fingerprint)
+					}
+				}
+			}
+
 			subID := fmt.Sprintf("%d", fingerprint)
 			if cid := mgr.ClientID(); cid != "" {
 				subID = fmt.Sprintf("%s:%s", cid, subID)
 			} else if cfg.Verbose {
 				fmt.Println("warning: clientID unknown; SubID will be fingerprint-only—server may not accept ACK/RECONNECT")
 			}
+			fmt.Println("SubID:", subID) // Explicitly print SubID for debugging
+
 			key := ""
 			if len(c.Args) > 0 {
 				key = c.Args[0]
@@ -227,10 +269,20 @@ func Run(host string, port int, cfg Config) {
 			}
 			mgr.SetCurrent(sub)
 
+			// Always create a dedicated ACK client to avoid deadlocks on the watch connection
+			var ackClient *dicedb.Client
+			if ac, err := dicedb.NewClient(host, port); err == nil {
+				ackClient = ac
+				if cfg.Verbose { fmt.Println("ack client established for EMITACK") }
+			} else {
+				fmt.Println(boldRed("ERR"), "failed to create ack client; ACKs may fail or deadlock:", err)
+			}
+
 			// Get the watch channel and start watching for changes
 			ch, err := client.WatchCh()
 			if err != nil {
 				fmt.Println("error watching:", err)
+				if ackClient != nil { ackClient.Close() }
 				continue
 			}
 
@@ -259,6 +311,12 @@ func Run(host string, port int, cfg Config) {
 						}
 						// retry loop with simple backoff
 						backoff := time.Second
+						maxBackoff := cfg.ReconnectBackoffMax
+						if maxBackoff <= 0 {
+							maxBackoff = 16 * time.Second
+						}
+						retries := 0
+						maxRetries := cfg.ReconnectRetries
 						var newClient *dicedb.Client
 						for {
 							cl, err := dicedb.NewClient(host, port)
@@ -270,10 +328,15 @@ func Run(host string, port int, cfg Config) {
 								fmt.Println("reconnect failed:", err, "; retrying in", backoff)
 							}
 							time.Sleep(backoff)
-							if backoff < 10*time.Second {
-								backoff *= 2
+							if backoff < maxBackoff { backoff *= 2; if backoff > maxBackoff { backoff = maxBackoff } }
+							retries++
+							if maxRetries > 0 && retries >= maxRetries {
+								fmt.Println(boldRed("ERR"), "reconnect retries exhausted. Exiting watch mode.")
+								shouldExitWatchMode = true
+								break
 							}
 						}
+						if shouldExitWatchMode { break }
 
 						// swap client and re-probe HELLO for new clientID
 						client = newClient
@@ -287,19 +350,22 @@ func Run(host string, port int, cfg Config) {
 							}
 						}
 
-						// rebuild SubID using new clientID and existing fingerprint
-						cid := mgr.ClientID()
-						if cid != "" {
-							sub.mu.Lock()
-							sub.SubID = fmt.Sprintf("%s:%d", cid, sub.Fingerprint)
-							sub.mu.Unlock()
-						}
 
 						// Try EMITRECONNECT first
 						if cfg.Verbose {
 							fmt.Println("calling EMITRECONNECT with last index", sub.LastProcessedCommitIndex)
 						}
-						status, nextIdx, err := emitReconnect(client, sub.Key, sub.SubID, sub.LastProcessedCommitIndex)
+						// Compute last processed index from dedupe store for current epoch, if known
+						lastIdx := sub.LastProcessedCommitIndex
+						if l, ok := ds.Get(sub.Fingerprint, sub.EpochUUID, sub.EpochCounter); ok {
+							lastIdx = l
+						}
+						// IMPORTANT: EMITRECONNECT must be called with the OLD sub_id (oldClientID:fp)
+						oldSubID := sub.SubID
+						if cfg.Verbose {
+							fmt.Println("EMITRECONNECT using old sub_id:", oldSubID)
+						}
+						status, nextIdx, err := emitReconnect(client, sub.Key, oldSubID, lastIdx)
 						if err == nil && strings.ToUpper(status) == "OK" {
 							if cfg.Verbose {
 								fmt.Printf("resume allowed: nextIndex=%d\n", nextIdx)
@@ -313,9 +379,20 @@ func Run(host string, port int, cfg Config) {
 							// reset batch
 							sub.highestIndex = 0
 							sub.pendingCount = 0
+							// After OK, switch to new sub_id = newClientID:fp for subsequent ACKs
+							if cid := mgr.ClientID(); cid != "" {
+								newSubID := fmt.Sprintf("%s:%d", cid, sub.Fingerprint)
+								if cfg.Verbose {
+									fmt.Println("switching to new sub_id:", newSubID)
+								}
+								sub.SubID = newSubID
+							}
 							sub.mu.Unlock()
 							// re-open watch channel
 							ch, _ = client.WatchCh()
+							// Recreate ack client to keep separation
+							if ackClient != nil { ackClient.Close(); ackClient = nil }
+							if ac, err := dicedb.NewClient(host, port); err == nil { ackClient = ac }
 							continue
 						}
 
@@ -336,23 +413,121 @@ func Run(host string, port int, cfg Config) {
 						// update fingerprint and SubID
 						sub.mu.Lock()
 						sub.Fingerprint = wresp.Fingerprint64
-						if cid != "" {
-							sub.SubID = fmt.Sprintf("%s:%d", cid, sub.Fingerprint)
+						// compute sub_id from current clientID and new fingerprint
+						if cid2 := mgr.ClientID(); cid2 != "" {
+							sub.SubID = fmt.Sprintf("%s:%d", cid2, sub.Fingerprint)
 						} else {
 							sub.SubID = fmt.Sprintf("%d", sub.Fingerprint)
 						}
 						sub.State = StateActive
 						sub.mu.Unlock()
 						ch, _ = client.WatchCh()
+						// Refresh ack client as well to avoid using a stale connection
+						if ackClient != nil { ackClient.Close(); ackClient = nil }
+						if ac, err := dicedb.NewClient(host, port); err == nil { ackClient = ac }
 						continue
 					}
-					// If we get any response over the watch channel,
-					// render the response
-					if resp != nil {
-						renderResponse(resp)
+					// If we get any response over the watch channel, handle emission prefix
+					if cfg.Verbose {
+						fmt.Printf("[watch recv] status=%v message=%q hasResponse=%t\n", resp.Status, resp.Message, resp.Response != nil)
 					}
+					// Always dump raw event when enabled (for debugging), but continue normal processing
+					if cfg.WatchDumpRaw {
+						if strings.TrimSpace(resp.Message) != "" {
+							fmt.Println("RAW:", resp.Message)
+						} else {
+							b, err := protojson.Marshal(resp)
+							if err == nil {
+								var m map[string]interface{}
+								_ = json.Unmarshal(b, &m)
+								nb, _ := json.MarshalIndent(m, "", "  ")
+								fmt.Println("RAW JSON:")
+								fmt.Println(string(nb))
+							} else {
+								fmt.Println("RAW (marshal error):", err)
+							}
+						}
+					}
+					eu, ec, ci, tail, okp := parseEmitPrefix(resp.Message)
+					// If prefix was present but commit index missing/invalid, print raw line to aid visibility
+					if okp && ci == 0 {
+						fmt.Println(resp.Message)
+						continue
+					}
+					if okp && ci > 0 {
+						// Dedupe by (fp, epochUUID, epochCounter)
+						fp := sub.Fingerprint
+						if shouldProcess(fp, eu, ec, ci, ds) {
+							// Update subscription state
+							sub.mu.Lock()
+							sub.LastProcessedCommitIndex = ci
+							sub.EpochUUID = eu
+							sub.EpochCounter = ec
+							sub.mu.Unlock()
+							// Transparency: print parsed epoch and index
+							fmt.Printf("[epoch=%s:%d, commit_index=%d] ", eu, ec, ci)
+							if cfg.Verbose {
+								if last, ok := ds.Get(fp, eu, ec); ok {
+									fmt.Printf("(last=%d) ", last)
+								}
+							}
+							// Print payload tail or pretty-print typed payload when tail is empty
+							if strings.TrimSpace(tail) != "" {
+								fmt.Println(tail)
+							} else if resp.Response != nil {
+								b, err := protojson.Marshal(resp)
+								if err == nil {
+									var m map[string]interface{}
+									_ = json.Unmarshal(b, &m)
+									nb, _ := json.MarshalIndent(m, "", "  ")
+									fmt.Println()
+									fmt.Println(string(nb))
+								} else {
+									fmt.Println()
+								}
+							} else {
+								fmt.Println()
+							}
+							// ACK synchronously (default behavior) to keep ordering and avoid races
+							if !cfg.NoAck {
+								var ackFC fireClient = client
+								if ackClient != nil { ackFC = ackClient }
+								if err := sendEmitAck(ackFC, sub.Key, sub.SubID, ci); err != nil {
+									if cfg.Verbose {
+										fmt.Println(boldRed("ERR"), "ACK failed:", err)
+									}
+								} else if cfg.Verbose {
+									fmt.Printf("[ack sent idx=%d]\n", ci)
+								}
+							}
+						} else {
+							if cfg.Verbose {
+								if last, ok := ds.Get(fp, eu, ec); ok {
+									fmt.Printf("[skip duplicate epoch=%s:%d idx=%d last=%d]\n", eu, ec, ci, last)
+								} else {
+									fmt.Printf("[skip duplicate epoch=%s:%d idx=%d]\n", eu, ec, ci)
+								}
+							}
+						}
+						// Skip default renderer for emission lines
+						continue
+					}
+					// Fallback when no emit prefix
+					if strings.TrimSpace(resp.Message) != "" {
+						// Show raw message directly for maximum visibility
+						fmt.Println(resp.Message)
+						// Apply ack policy if enabled (legacy path)
+						var ackFC fireClient = client
+						if ackClient != nil { ackFC = ackClient }
+						maybeAckOnReceive(mgr, ackFC, sub, resp)
+						continue
+					}
+					// If message is empty, try the generic renderer (typed payloads)
+					renderResponse(resp)
 					// Apply ack policy if enabled
-					maybeAckOnReceive(mgr, client, sub, resp)
+					var ackFC fireClient = client
+					if ackClient != nil { ackFC = ackClient }
+					maybeAckOnReceive(mgr, ackFC, sub, resp)
 				}
 			}
 
@@ -366,9 +541,27 @@ func Run(host string, port int, cfg Config) {
 			sub.highestIndex = 0
 			sub.pendingCount = 0
 			sub.mu.Unlock()
-			if pc > 0 {
-				_ = sendEmitAck(client, sub.Key, sub.SubID, hi)
+			if pc > 0 && !cfg.NoAck {
+				var ackFC fireClient = client
+				if ackClient != nil { ackFC = ackClient }
+				// final flush: send synchronously
+				_ = sendEmitAck(ackFC, sub.Key, sub.SubID, hi)
 			}
+
+			// Send UNWATCH to server to clean up subscription
+			// Use the original fingerprint, not the sub_id
+			if ackClient != nil {
+				unwatchCmd := &wire.Command{
+					Cmd:  "GET.WATCH.UNWATCH",
+					Args: []string{fmt.Sprintf("%d", sub.Fingerprint)},
+				}
+				if cfg.Verbose {
+					fmt.Println("sending UNWATCH for fingerprint:", sub.Fingerprint)
+				}
+				ackClient.Fire(unwatchCmd)
+			}
+
+			if ackClient != nil { ackClient.Close() }
 		} else {
 			// If the command is not a watch command, render the response
 			// and continue to the next command in REPL
@@ -481,21 +674,61 @@ func renderResponse(resp *wire.Result) {
 	case *wire.Result_ZRANKRes:
 		printZElement(resp.GetZRANKRes().Element)
 	case *wire.Result_GETWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_HGETWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_HGETALLWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_ZRANGEWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_ZCARDWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_ZCOUNTWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_ZRANKWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_UNWATCHRes:
-		fmt.Printf("\n")
+		b, err := protojson.Marshal(resp)
+		if err != nil { log.Fatalf("failed to marshal to JSON: %v", err) }
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		nb, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(nb))
 	case *wire.Result_GEOADDRes:
 		fmt.Printf("%d\n", resp.GetGEOADDRes().Count)
 	case *wire.Result_GEODISTRes:
@@ -587,7 +820,25 @@ func parseArgs(input string) []string {
 	if len(cur) > 0 {
 		out = append(out, string(cur))
 	}
-	// If we ended still in quotes, we accept the collected token as-is
-	// so unterminated quotes are tolerated.
 	return out
+}
+
+// parseFingerprintFromMsg attempts to extract [fingerprint=123] from a message string
+func parseFingerprintFromMsg(msg string) (uint64, bool) {
+	// Simple scan for "[fingerprint="
+	start := strings.Index(msg, "[fingerprint=")
+	if start == -1 {
+		return 0, false
+	}
+	rest := msg[start+len("[fingerprint="):]
+	end := strings.Index(rest, "]")
+	if end == -1 {
+		return 0, false
+	}
+	valStr := rest[:end]
+	val, err := strconv.ParseUint(valStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return val, true
 }
