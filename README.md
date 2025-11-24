@@ -78,6 +78,11 @@ This CLI supports acknowledging emissions and resuming after reconnect. It is op
   - `--emit-ack-batch-size` coalesce ACKs (0 disables)
   - `--emit-ack-flush-interval` periodic flush for ACK batching (e.g., `200ms`)
   - `--verbose` logs extra details about emit sequences, acks, and reconnect decisions
+  - `--no-ack` don’t send EMITACK (display-only mode)
+  - `--dedupe-state-file=<path>` persist dedupe watermark per `(fingerprint, epochUUID, epochCounter)` as JSON to resume across restarts
+  - `--reconnect-retries=<N>` number of reconnect attempts before giving up (0 = infinite)
+  - `--reconnect-backoff-max=<duration>` cap the reconnect backoff (default `16s`)
+  - `--watch-dump-raw` dump every raw watch event (plain message or full JSON) in addition to normal processing (useful for debugging)
 
 - Local REPL helpers (prefixed with `:`):
   - `:emitreconnect` — calls `EMITRECONNECT <key> <sub_id> <last_index>` for the current watch subscription
@@ -88,6 +93,7 @@ Notes:
 - SubIDs are constructed as `clientID:fingerprint64` when the server exposes a clientID via `HELLO`; otherwise the CLI falls back to fingerprint-only and warns in verbose mode.
 - Until the server includes a commit index in emissions, auto-ack won’t fire (no index to ACK). Manual `:emitack <index>` is the safe default.
 - When EMITRECONNECT returns `OK <nextIndex>`, the CLI records that resume point; if it returns `STALE_SEQUENCE`, `INVALID_SEQUENCE`, or `SUBSCRIPTION_NOT_FOUND`, re-issue your `*.WATCH` command to recover.
+ - When available, the CLI parses emission prefixes like `[emit_epoch=<uuid>:<counter>, emit_commit_index=<N>] <payload>`, logs the epoch/index, and dedupes strictly by `(fingerprint, epochUUID, epochCounter, commitIndex)` so the same event isn’t processed twice.
 
 #### Server contract for HELLO (HELLORes)
 
