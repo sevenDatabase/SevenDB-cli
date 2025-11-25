@@ -47,6 +47,11 @@ You can also get all available parameters by firing
 $ sevendb-cli --help
 ```
 
+For debugging 
+```sh
+$ sevendb-cli --watch-dump-raw --verbose
+```
+
 ## Firing commands
 
 You can execute any DiceDB or SevenDB command directly:
